@@ -1,0 +1,14 @@
+version=0.1
+ [default.global.parameters]
+ stack_name = "prowe-ssm-sandbox"
+ region = "us-east-2"
+ 
+ [default.deploy.parameters]
+ s3_bucket = "prowe-sai-sandbox-dev-deploy"
+ s3_prefix = "prowe-ssm-sandbox"
+ capabilities = "CAPABILITY_IAM"
+ fail_on_empty_changeset = "false"
+ parameter_overrides = [
+    "VpcId=vpc-df49abb4",
+    "SubnetId=subnet-3477dc78"
+]

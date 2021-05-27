@@ -1,0 +1,189 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: 'AWS::Serverless-2016-10-31'
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Subnet Id to run in
+
+Resources:
+  SSMLogsBucket:
+    Type: AWS::S3::Bucket
+
+  ServerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - sts:AssumeRole
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+                - ssm.amazonaws.com
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonEC2RoleforSSM'
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore'
+      Policies:
+        - PolicyName: server_grants
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:StartAutomationExecution
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - s3:*
+                Resource:
+                  - arn:aws:s3:::prowe-sai-sandbox-dev-deploy
+                  - arn:aws:s3:::prowe-sai-sandbox-dev-deploy/*
+                  - !Sub 'arn:aws:s3:::aws-ssm-${AWS::Region}/*'
+                  - !Sub 'arn:aws:s3:::aws-windows-downloads-${AWS::Region}/*'
+                  - !Sub 'arn:aws:s3:::amazon-ssm-${AWS::Region}/*'
+                  - !Sub 'arn:aws:s3:::amazon-ssm-packages-${AWS::Region}/*'
+                  - !Sub 'arn:aws:s3:::${AWS::Region}-birdwatcher-prod/*'
+                  - !Sub 'arn:aws:s3:::patch-baseline-snapshot-${AWS::Region}/*'
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:PutObjectAcl
+                  - s3:ListBucket
+                Resource: 
+                  - !Sub 'arn:${AWS::Partition}:s3:::${SSMLogsBucket}/*'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${SSMLogsBucket}'
+              # - Effect: Allow
+              #   Action:
+              #     - iam:PassRole
+              #   Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:role/${ADDSRole}'
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref ServerRole
+
+  ServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Wide Open
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: -1 
+
+  Server:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: 'resolve:ssm:/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-arm64-gp2'
+      IamInstanceProfile: !Ref InstanceProfile
+      InstanceType: 't4g.nano'
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds:
+        - !Ref ServerSecurityGroup
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: '100'
+            VolumeType: gp2
+      KeyName: prowe-macbook
+
+  CloudwatchAssociation:
+    Type: AWS::SSM::Association
+    Properties:
+      Name: AWS-ConfigureAWSPackage
+      Targets:
+        - Key: InstanceIds
+          Values:
+            - !Ref Server
+      Parameters:
+        action:
+          - Install
+        name:
+          - AmazonCloudWatchAgent
+
+  CloudwatchConfiguration:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Type: String
+      Value: |
+        {
+          "logs": {
+            "logs_collected": {
+              "files": {
+                "collect_list": [
+                  {
+                    "file_path": "/var/log/amazon/ssm/amazon-ssm-agent.log",
+                    "log_group_name": "ssm-output"
+                  },
+                  {
+                    "file_path": "/var/log/amazon/ssm/errors.log",
+                    "log_group_name": "ssm-errors"
+                  }
+                ]
+              }
+            }
+          }
+        }
+  
+  CloudwatchConfigurationAssociation:
+    Type: AWS::SSM::Association
+    DependsOn:
+      - CloudwatchAssociation
+    Properties:
+      Name: AmazonCloudWatch-ManageAgent
+      Targets:
+        - Key: InstanceIds
+          Values:
+            - !Ref Server
+      Parameters:
+        optionalConfigurationSource:
+          - ssm
+        optionalConfigurationLocation:
+          - !Ref CloudwatchConfiguration
+
+  AutoPatchAssociation:
+    Type: AWS::SSM::Association
+    Properties:
+      Name: AWS-ConfigureKernelLivePatching
+      ScheduleExpression: "rate(30 minutes)"
+      Parameters:
+        EnableOrDisable:
+          - Enable
+      Targets:
+        - Key: InstanceIds
+          Values:
+            - !Ref Server #This could be '*' or whatever
+
+  AnsibleAssociation:
+    Type: AWS::SSM::Association
+    Properties:
+      Name: AWS-ApplyAnsiblePlaybooks
+      WaitForSuccessTimeoutSeconds: 300
+      Targets:
+        - Key: InstanceIds
+          Values:
+            - !Ref Server
+      OutputLocation:
+        S3Location: 
+          OutputS3BucketName: !Ref SSMLogsBucket
+          OutputS3KeyPrefix: 'logs/'
+      Parameters:
+        SourceType:
+          - 'S3'
+        SourceInfo:
+          -  !Sub |
+              {"path": "https://prowe-sai-sandbox-dev-deploy.s3.amazonaws.com/prowe-ssm-sandbox/ansible.zip"}
+        InstallDependencies:
+          - 'True'
+        PlaybookFile:
+          - playbook.yml
+
+Outputs:
+  InstanceDns:
+    Value: !GetAtt Server.PublicDnsName

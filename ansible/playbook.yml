@@ -1,0 +1,6 @@
+---
+- name: My task
+  hosts: all
+  tasks:
+    - name: Leaving a mark
+      script: ./date_stamp.sh
